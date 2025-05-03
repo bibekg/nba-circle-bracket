@@ -437,78 +437,162 @@ function renderBracket(data) {
   for (let roundNum = 2; roundNum <= numRounds; roundNum++) {
     const roundIndex = roundNum - 1;
     const currentRoundData = data.rounds[roundIndex];
-    const prevRoundIndex = roundIndex - 1;
-    teamPositions[roundNum] = {};
-    seriesMidpoints[roundNum] = {};
+    const prevRoundIndex = roundIndex - 1; // Index for the previous round data
+    const prevRoundData = data.rounds[prevRoundIndex];
+    teamPositions[roundNum] = {}; // Store positions for potential connectors
+    seriesMidpoints[roundNum] = {}; // Store midpoints for potential connectors
 
-    const numSeriesInRound = currentRoundData.series.length;
-    const slotsPerSeries = numFirstRoundSlots / numSeriesInRound;
+    const numSeriesInCurrentRound = currentRoundData.series.length;
+    // Note: slotsPerSeriesCurrent is NOT directly used for arc angles anymore
+    // const slotsPerSeriesCurrent = numFirstRoundSlots / numSeriesInCurrentRound;
 
-    // Arc generator for the current round
+    // Arc generator for the current round's band thickness
     const roundArcGenerator = d3
       .arc()
       .innerRadius(radialScale(roundIndex + 1))
       .outerRadius(radialScale(roundIndex));
 
-    currentRoundData.series.forEach((series, seriesIndex) => {
-      const seriesPos = getSeriesMidPoint(series, roundNum); // Still useful for positioning
-      seriesMidpoints[roundNum][series.id] = seriesPos;
-      teamPositions[roundNum][series.id] = {};
+    // Pre-calculate previous round winners and their angular slot ranges
+    // This is crucial for knowing where to draw the arcs in the current round band
+    const prevRoundInfo = {};
+    const numSeriesInPrevRound = prevRoundData.series.length;
+    const slotsPerSeriesPrev = numFirstRoundSlots / numSeriesInPrevRound;
+    prevRoundData.series.forEach((prevSeries, prevSeriesIndex) => {
+      const prevWinner = prevSeries.highSeed.winner ? prevSeries.highSeed : prevSeries.lowSeed;
+      const startSlot = prevSeriesIndex * slotsPerSeriesPrev;
+      const endSlot = (prevSeriesIndex + 1) * slotsPerSeriesPrev;
+      prevRoundInfo[prevSeries.id] = {
+        winner: prevWinner,
+        startAngle: angularScale(startSlot), // Base angle on the fixed 16-slot scale
+        endAngle: angularScale(endSlot),
+      };
+    });
 
-      const winner = series.highSeed.winner ? series.highSeed : series.lowSeed;
-      const loser = series.highSeed.winner ? series.lowSeed : series.highSeed;
+    currentRoundData.series.forEach((series /*, seriesIndex*/) => {
+      const seriesWinner = series.highSeed.winner ? series.highSeed : series.lowSeed;
+      // const seriesLoser = series.highSeed.winner ? series.lowSeed : series.highSeed; // Not directly used below
 
-      // Store winner position (using midpoint for consistency)
-      teamPositions[roundNum][series.id][winner.name] = { ...seriesPos, winner: true };
-      if (loser.name !== "TBD") {
-        teamPositions[roundNum][series.id][loser.name] = { ...seriesPos, winner: false };
+      // Get info for the two teams competing in this series (winners from previous round)
+      const sourceIdA = series.sourceSeriesIds[0];
+      const sourceIdB = series.sourceSeriesIds[1];
+      const infoA = prevRoundInfo[sourceIdA];
+      const infoB = prevRoundInfo[sourceIdB];
+
+      if (!infoA || !infoB) {
+        console.error("Could not find previous round info for series", series.id);
+        return; // Skip rendering this part if data is inconsistent
       }
 
-      // ** START: Draw Colored Arc for Winner **
-      const seriesAngleStart = angularScale(seriesIndex * slotsPerSeries);
-      const seriesAngleEnd = angularScale((seriesIndex + 1) * slotsPerSeries);
+      const winnerA = infoA.winner; // Team advancing from source series A
+      const winnerB = infoB.winner; // Team advancing from source series B
 
-      svg
-        .append("path")
-        .attr(
-          "d",
-          roundArcGenerator({
-            startAngle: seriesAngleStart + teamArcPadding / numSeriesInRound, // Scale padding
-            endAngle: seriesAngleEnd - teamArcPadding / numSeriesInRound,
-          }),
-        )
-        .attr("fill", teamColors[winner.name] || defaultColor)
-        .attr("stroke", "#fff");
-      // ** END: Draw Colored Arc for Winner **
+      // Use a smaller padding proportional to the arc size
+      // Calculate padding based on the angular span of one previous series slot
+      const basePaddingAngle = (infoA.endAngle - infoA.startAngle) * 0.03; // Small % of arc width
+      const padding = Math.min(teamArcPadding / numSeriesInPrevRound, basePaddingAngle); // Ensure reasonable padding
 
-      // ** START: Add Winner Label inside Arc **
+      // --- Draw Arc for Winner A ---
+      // Use the angular range determined by source series A's position in the previous round
+      const arcA_start = infoA.startAngle + padding / 2;
+      const arcA_end = infoA.endAngle - padding / 2;
+      // Ensure start < end, handle potential floating point issues
+      if (arcA_start < arcA_end) {
+        svg
+          .append("path")
+          .attr("d", roundArcGenerator({ startAngle: arcA_start, endAngle: arcA_end }))
+          .attr("fill", teamColors[winnerA.name] || defaultColor)
+          .attr("stroke", "#fff");
+      }
+
+      // --- Draw Arc for Winner B ---
+      // Use the angular range determined by source series B's position in the previous round
+      const arcB_start = infoB.startAngle + padding / 2;
+      const arcB_end = infoB.endAngle - padding / 2;
+      // Ensure start < end
+      if (arcB_start < arcB_end) {
+        svg
+          .append("path")
+          .attr("d", roundArcGenerator({ startAngle: arcB_start, endAngle: arcB_end }))
+          .attr("fill", teamColors[winnerB.name] || defaultColor)
+          .attr("stroke", "#fff");
+      }
+
+      // --- Position and Draw Labels + Dots ---
       const labelRadius = getMidRadius(roundIndex);
-      const labelAngle = seriesPos.angle; // Midpoint angle
-      const labelX = labelRadius * Math.cos(labelAngle - Math.PI / 2);
-      const labelY = labelRadius * Math.sin(labelAngle - Math.PI / 2);
-      let rotation = (labelAngle * 180) / Math.PI - 90; // Angle relative to vertical
-      if (rotation > 90 || rotation < -90) {
-        rotation += 180;
-      }
-      // Reduce font size for inner rounds if needed
-      const fontSize = Math.max(8, 12 - roundIndex * 1.5);
+      const fontSize = Math.max(8, 12 - roundIndex * 1.5); // Decrease font size for inner rounds
 
+      // Helper to calculate label position and rotation
+      function calculateLabelPos(midAngle) {
+        const x = labelRadius * Math.cos(midAngle - Math.PI / 2);
+        const y = labelRadius * Math.sin(midAngle - Math.PI / 2);
+        let rotation = (midAngle * 180) / Math.PI - 90; // Angle relative to vertical
+        // Adjust rotation for labels on the left half to be readable
+        if (rotation > 90 || rotation < -90) {
+          rotation += 180;
+        }
+        return { x, y, rotation, angle: midAngle }; // Include angle for dot positioning
+      }
+
+      // Label and Position for Team A (Winner of Source Series A)
+      const midAngleA = (infoA.startAngle + infoA.endAngle) / 2; // Midpoint of original slot
+      const posA = calculateLabelPos(midAngleA);
+      const isWinnerA = winnerA.name === seriesWinner.name;
       svg
         .append("text")
         .attr("class", "team-label")
-        .attr("transform", `translate(${labelX}, ${labelY}) rotate(${rotation})`)
+        .attr("transform", `translate(${posA.x}, ${posA.y}) rotate(${posA.rotation})`)
         .attr("text-anchor", "middle")
         .attr("dy", "0.35em")
         .style("fill", "white")
         .style("font-size", `${fontSize}px`)
-        .style("font-weight", "bold")
-        .text(winner.name);
-      // ** END: Add Winner Label inside Arc **
+        .style("font-weight", isWinnerA ? "bold" : "normal") // Bold if winner of *current* series
+        .text(winnerA.name);
 
-      // ** Draw Winner Dots for this series **
-      // Use the winner data object (which contains gamesWon for *this* series)
-      // and the series midpoint position
-      drawGameDots(svg, winner, seriesPos, roundIndex);
+      // Label and Position for Team B (Winner of Source Series B)
+      const midAngleB = (infoB.startAngle + infoB.endAngle) / 2; // Midpoint of original slot
+      const posB = calculateLabelPos(midAngleB);
+      const isWinnerB = winnerB.name === seriesWinner.name;
+      svg
+        .append("text")
+        .attr("class", "team-label")
+        .attr("transform", `translate(${posB.x}, ${posB.y}) rotate(${posB.rotation})`)
+        .attr("text-anchor", "middle")
+        .attr("dy", "0.35em")
+        .style("fill", "white")
+        .style("font-size", `${fontSize}px`)
+        .style("font-weight", isWinnerB ? "bold" : "normal") // Bold if winner of *current* series
+        .text(winnerB.name);
+
+      // --- Draw Game Dots ---
+      // Dots represent the games won in the *current* series.
+      // Place them near the label of the team that won *this* series.
+      const winnerPositionForDots = isWinnerA ? posA : posB;
+      // Need to pass radius to drawGameDots, use labelRadius
+      winnerPositionForDots.radius = labelRadius;
+      // The winner object needs to be the one from the *current* series data (contains gamesWon)
+      drawGameDots(svg, seriesWinner, winnerPositionForDots, roundIndex);
+
+      // --- Update tracking arrays (optional, for potential future use e.g., connectors) ---
+      // Store the midpoint of the combined region this series represents
+      const combinedStartAngle = Math.min(infoA.startAngle, infoB.startAngle);
+      const combinedEndAngle = Math.max(infoA.endAngle, infoB.endAngle); // Crude, ignores wrap-around
+      // TODO: Handle angle wrap-around if needed for combined midpoint calculation
+      seriesMidpoints[roundNum][series.id] = {
+        angle: (combinedStartAngle + combinedEndAngle) / 2, // Placeholder calculation
+        radius: labelRadius,
+      };
+      // Store positions based on the individual winner arcs/labels
+      teamPositions[roundNum][series.id] = {};
+      teamPositions[roundNum][series.id][winnerA.name] = {
+        ...posA,
+        winner: isWinnerA,
+        sourceSeriesId: sourceIdA,
+      };
+      teamPositions[roundNum][series.id][winnerB.name] = {
+        ...posB,
+        winner: isWinnerB,
+        sourceSeriesId: sourceIdB,
+      };
     });
   }
 
